@@ -1,5 +1,5 @@
 from fastapi import FastAPI, HTTPException
-from supabase import create_client, Client
+from supabase import create_client
 from dotenv import load_dotenv
 from pydantic import BaseModel
 from typing import List
@@ -8,31 +8,58 @@ import time
 
 app = FastAPI()
 load_dotenv()
-
-url = os.getenv("SUPABASE_URL")
-key = os.getenv("SUPABASE_KEY")
-supabase: Client = create_client(url, key)
+supabase = create_client(os.getenv("SUPABASE_URL"), os.getenv("SUPABASE_KEY"))
 
 class Conversation(BaseModel):
     id: int
     created_at: str
     user_message: str
     assistant_message: str
-    recipient: str
     sender: str
+    recipient: str
     name: str
 
-def get_conversation() -> List[Conversation]:
-    try:
-        response = supabase.table('conversationmemories').select('*').order('id', desc=True).execute()
-        return response.data
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error fetching conversations: {str(e)}")
+class GroupedConversation(BaseModel):
+    sender: str
+    name: str
+    conversations: List[Conversation]
 
-@app.get("/conversations", response_model=dict)
-async def fetch_conversations():
-    conversations = get_conversation()
+def fetch_conversations(phone: str = None) -> List[GroupedConversation]:
+    query = supabase.table("conversationmemories").select("*").order("created_at",desc=True)
+    if phone:
+        query = query.eq("sender", phone)
+    
+    response = query.execute()
+    if not response.data:
+        raise HTTPException(status_code=404, detail=f"No conversations found{' for ' + phone if phone else ''}")
+    
+    groups = {}
+    for item in response.data:
+        sender = item["sender"]
+        if sender not in groups:
+            groups[sender] = {
+                "sender": sender,
+                "name": item["name"],
+                "conversations": []
+            }
+        groups[sender]["conversations"].append(Conversation(**item))
+    
+    return [GroupedConversation(**group) for group in groups.values()]
+
+@app.get("/conversations")
+async def get_all_conversations():
+    conversations = fetch_conversations()
+    senders = [group.sender for group in conversations]
+    return {
+        "unique_senders": senders,
+        "conversations": conversations,
+        "last_updated": time.strftime("%Y-%m-%d %H:%M:%S")
+    }
+
+@app.get("/conversations/phone/{phone}")
+async def get_conversations_by_phone(phone: str):
+    conversations = fetch_conversations(phone)
     return {
         "conversations": conversations,
-        "last_updated": time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(time.time()))
+        "last_updated": time.strftime("%Y-%m-%d %H:%M:%S")
     }
